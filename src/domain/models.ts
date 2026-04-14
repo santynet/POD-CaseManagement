@@ -134,9 +134,14 @@ export interface Citation {
   citation_number: string
   violation_code: string
   violation_description: string
+  ordinance_or_statute?: string | null
   location?: string | null
   incident_date: string
   entered_date: string
+  notice_date?: string | null
+  disposition_date?: string | null
+  court_date?: string | null
+  closed_date?: string | null
   due_date?: string | null
   issuing_officer?: string | null
   agency?: string | null
@@ -148,6 +153,12 @@ export interface Citation {
   is_in_collections: boolean
   has_registration_hold: boolean
   has_tow_order: boolean
+  vehicle_make?: string | null
+  vehicle_body_style?: string | null
+  vehicle_color?: string | null
+  vehicle_year?: number | null
+  legacy_source?: string | null
+  legacy_disposition_code?: string | null
   created_at: string
   updated_at: string
 }

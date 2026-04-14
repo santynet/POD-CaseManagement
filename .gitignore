@@ -1,5 +1,11 @@
 node_modules
 .claude/
+
+# Legacy PVS export files — contain real plate numbers and addresses,
+# never commit.
+pvs*.txt
+pvs*.tsv
+import-errors.log
 dist
 dist-ssr
 *.local

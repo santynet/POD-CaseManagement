@@ -41,6 +41,7 @@ export function OverviewTab({ data }: OverviewTabProps) {
           <SectionHeader eyebrow="Violation" title="Incident details" />
           <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <Info label="Charge code" value={c.violation_code} />
+            <Info label="Ordinance / statute" value={c.ordinance_or_statute ?? '—'} />
             <Info label="Description" value={c.violation_description} />
             <Info label="Location" value={c.location ?? '—'} />
             <Info label="Incident date" value={formatDateTime(c.incident_date)} />
@@ -67,13 +68,21 @@ export function OverviewTab({ data }: OverviewTabProps) {
             <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
               <Info label="Plate" value={`${data.plate.plate_number} · ${data.plate.state}`} />
               <Info label="Lookup status" value={data.plate.lookup_status} />
-              {data.vehicle && (
+              {data.vehicle ? (
                 <>
                   <Info label="Make / model" value={`${data.vehicle.make ?? '—'} ${data.vehicle.model ?? ''}`} />
                   <Info label="Year / color" value={`${data.vehicle.year ?? '—'} ${data.vehicle.color ?? ''}`} />
                   <Info label="VIN" value={data.vehicle.vin ?? '—'} />
                   <Info label="Body style" value={data.vehicle.body_style ?? '—'} />
                 </>
+              ) : (
+                (c.vehicle_make || c.vehicle_year || c.vehicle_color || c.vehicle_body_style) && (
+                  <>
+                    <Info label="Make" value={c.vehicle_make ?? '—'} />
+                    <Info label="Year / color" value={`${c.vehicle_year ?? '—'} ${c.vehicle_color ?? ''}`} />
+                    <Info label="Body style" value={c.vehicle_body_style ?? '—'} />
+                  </>
+                )
               )}
             </dl>
           </Card>

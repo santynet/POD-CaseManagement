@@ -169,6 +169,35 @@ change. See [ASSUMPTIONS.md](ASSUMPTIONS.md) for the full list of stubs and
 [NEXT_STEPS.md](NEXT_STEPS.md) for the production migration path (including
 the route to swap Supabase for a .NET API + SQL Server).
 
+## Legacy data import (PVS3805)
+
+- A CLI importer lives at [scripts/import-pvs.ts](scripts/import-pvs.ts).
+  Run it with `npm run import:pvs -- --file <path> [--dry-run] [--limit N]`.
+- Pure parser is at [scripts/import/parsePvsRow.ts](scripts/import/parsePvsRow.ts)
+  with unit tests in [scripts/import/__tests__/parsePvsRow.test.ts](scripts/import/__tests__/parsePvsRow.test.ts).
+- Requires `DATABASE_URL` in `.env` — the direct Postgres URI from
+  Supabase → Project Settings → Database → Connection pooler (Session
+  mode). The importer uses `pg` directly, not the Supabase JS client, so
+  it can do multi-row upserts at full speed.
+- Schema additions for legacy fields are in [supabase/migrations/0003_legacy_import.sql](supabase/migrations/0003_legacy_import.sql).
+  `citations` gained `ordinance_or_statute`, `notice_date`,
+  `disposition_date`, `court_date`, `closed_date`, denormalized
+  `vehicle_make`/`body_style`/`color`/`year`, and `legacy_*` fields.
+  `ledger_entries` and `docket_entries` gained `source` (default `'user'`)
+  and `source_key` with partial unique indexes on `source='import'`.
+- Full flag reference and quirks in [scripts/import/README.md](scripts/import/README.md).
+
+### Importer invariants
+
+- Re-runs upsert by `citation_number` and by `(case_id, source_key)` for
+  synthetic ledger/docket rows. **User-authored rows (`source='user'`) are
+  never touched.**
+- Missing rows on a subsequent import are left alone — no deletes.
+- Plate resolution follows the user's rule: origin-tag wins, else
+  strip-trailing-digits when `HH-DECAL-NBR` is a prefix, else raw tag.
+- Disposition mapping is in [scripts/import/mapDisposition.ts](scripts/import/mapDisposition.ts)
+  — update the dictionary there when new codes arrive.
+
 ## Things the plan explicitly deferred
 
 - Real auth / SSO / MFA
