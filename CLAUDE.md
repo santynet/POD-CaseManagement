@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # POD New System — Claude guide
 
 Desktop-first web app for the Parking Operations Department. Manages parking
@@ -53,18 +57,20 @@ src/
 
 ## Screens (10)
 
-1. **Login** — Supabase Auth password sign-in
-2. **Dashboard** — KPI grid
-3. **Global Search** — Citations / Parties / Plates tabs
-4. **Master Case Detail** — asymmetric header + 8 tabs (Overview, Parties,
-   Plate & Vehicle, Financials, Hearings, Documents, Docket, Collections)
-5. **Party Detail** — personal info, plate history, related cases
-6. **Plate & Vehicle History** — vertical timeline
-7. **Ledger & Docket** — financial ledger + docket timeline (also embedded
-   as tabs on the case detail)
-8. **Transfer Liability** — 3-step wizard (Identify → Reason → Review)
-9. **Registration Lookup Queue** — FL/OOS tabs
-10. **Notice Queue** — outbound notices
+| Route | Screen | Notes |
+|---|---|---|
+| `/login` | Login | Supabase Auth password sign-in |
+| `/dashboard` | Dashboard | KPI grid |
+| `/search` | Global Search | Citations / Parties / Plates tabs |
+| `/cases/:caseId` | Master Case Detail | asymmetric header + 8 tabs (Overview, Parties, Plate & Vehicle, Financials, Hearings, Documents, Docket, Collections) |
+| `/cases/:caseId/ledger` | Ledger & Docket | financial ledger + docket timeline (also embedded as tabs on case detail) |
+| `/cases/:caseId/transfer` | Transfer Liability | 3-step wizard (Identify → Reason → Review) |
+| `/parties/:partyId` | Party Detail | personal info, plate history, related cases |
+| `/plates/:plateId` | Plate & Vehicle History | vertical timeline |
+| `/lookups` | Registration Lookup Queue | FL/OOS tabs |
+| `/notices` | Notice Queue | outbound notices |
+
+All routes except `/login` are protected by `RequireAuth` in [src/App.tsx](src/App.tsx), which reads the Zustand session store and redirects to `/login` if no user is present.
 
 ## Core business rules (respect these when editing)
 
@@ -144,12 +150,16 @@ returns "Database error querying schema".
 - Great for demoing search → case detail → accept payment → transfer
   liability → party detail → plate history
 
-## Running locally
+## Commands
 
 ```bash
-npm install            # once
-npm run dev            # Vite dev server on :5173
-npm run build          # tsc + vite build
+npm install                          # once
+npm run dev                          # Vite dev server on :5173
+npm run build                        # tsc + vite build
+npm test                             # run all Vitest tests once
+npm run test:watch                   # Vitest in watch mode
+npx vitest run scripts/import/__tests__/parsePvsRow.test.ts   # single test file
+npm run import:pvs -- --file <path> [--dry-run] [--limit N]  # PVS legacy import
 ```
 
 Windows PowerShell note: if `npm run dev` is blocked by execution policy,

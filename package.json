@@ -9,7 +9,12 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "import:pvs": "tsx scripts/import-pvs.ts"
+    "import:pvs": "tsx scripts/import-pvs.ts",
+    "import:agencies": "tsx scripts/import-agencies.ts",
+    "import:statutes": "tsx scripts/import-statutes.ts",
+    "import:dispositions": "tsx scripts/import-disposition-codes.ts",
+    "import:court-locations": "tsx scripts/import-court-locations.ts",
+    "import:owner": "tsx scripts/import-owner.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",
