@@ -3,20 +3,27 @@
  * Vehicle registration records importer (PVS3848-OWNER).
  *
  * Usage:
- *   npx tsx scripts/import-owner.ts --file <path> [--dry-run] [--limit N] [--batch-size N] [--skip-is-current]
+ *   npx tsx scripts/import-owner.ts --file <path> [--dry-run] [--limit N] [--batch-size N] [--throttle-ms N]
  *
  * Flags:
  *   --file <path>        Required. Path to the PVS tab-delimited owner file.
- *   --dry-run            Parse and validate only; no DB writes.
+ *   --dry-run            Parse and validate only; no DB writes. Prints is_current assignments.
  *   --limit <n>          Stop after N data rows (useful for test runs).
- *   --batch-size <n>     Rows per upsert batch. Default 500.
- *   --skip-is-current    Skip the is_current update pass at the end.
+ *   --batch-size <n>     Rows per upsert batch. Default 200.
+ *   --throttle-ms <n>    Milliseconds to sleep between batches. Default 0. Use 50 for live runs.
+ *
+ * Strategy: two-pass.
+ *   Pass 1 — stream the file, build an in-memory map of the latest (stored_date, stored_time)
+ *            per (plate_number, plate_state). ~40 MB RAM for 1M unique plates.
+ *   Pass 2 — stream the file again; each row is tagged is_current=true if it matches the
+ *            latest map entry, false otherwise. Batch-upsert into registration_records.
+ *
+ * This avoids a post-import full-table UPDATE that times out on large datasets.
  *
  * Upsert key: (plate_number, plate_state, stored_date, stored_time)
- * After all batches, runs a SQL pass to set is_current on the latest record per plate.
  *
- * Requires DATABASE_URL in .env — copy from Supabase dashboard under
- *   Project Settings → Database → Connection pooler → Session mode URI.
+ * Requires DATABASE_URL in .env — Supabase Project Settings → Database → Connection pooler
+ * (Session mode URI).
  */
 
 import { createReadStream, existsSync, readFileSync } from 'node:fs'
@@ -31,23 +38,48 @@ interface Args {
   dryRun: boolean
   limit: number | null
   batchSize: number
-  skipIsCurrentUpdate: boolean
-  onlyIsCurrentUpdate: boolean
+  throttleMs: number
+}
+
+function printHelp(): void {
+  console.log(`
+Usage: npm run import:owner -- --file <path> [options]
+
+Import vehicle registration records (PVS3848-OWNER.TXT) into the
+registration_records table. Upserts on (plate_number, plate_state, stored_date, stored_time).
+
+Uses a two-pass strategy to set is_current without a post-import DB update:
+  Pass 1 — scans the file to find the latest (stored_date, stored_time) per plate (~40 MB RAM).
+  Pass 2 — re-streams and upserts each row with is_current already set.
+
+Options:
+  --file <path>       Required. Path to the PVS tab-delimited owner file.
+  --dry-run           Parse and validate only; no DB writes. Prints is_current counts.
+  --limit <n>         Stop after N rows (for test runs).
+  --batch-size <n>    Rows per upsert batch. Default: 200.
+  --throttle-ms <n>   Sleep (ms) between batches. Default: 0. Use 50 for live runs.
+  --help, -h          Show this help message.
+
+Recommended full-file run:
+  npm run import:owner -- --file <path> --throttle-ms 50
+
+Requires DATABASE_URL in .env (Supabase → Settings → Database → Connection pooler, Session mode).
+`.trim())
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { file: '', dryRun: false, limit: null, batchSize: 500, skipIsCurrentUpdate: true, onlyIsCurrentUpdate: false }
+  const args: Args = { file: '', dryRun: false, limit: null, batchSize: 200, throttleMs: 0 }
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
-      case '--file':             args.file = argv[++i]; break
-      case '--dry-run':          args.dryRun = true; break
-      case '--limit':            args.limit = Number(argv[++i]); break
-      case '--batch-size':       args.batchSize = Number(argv[++i]); break
-      case '--skip-is-current':  args.skipIsCurrentUpdate = true; break
-      case '--only-is-current':  args.onlyIsCurrentUpdate = true; break
+      case '--file':         args.file = argv[++i]; break
+      case '--dry-run':      args.dryRun = true; break
+      case '--limit':        args.limit = Number(argv[++i]); break
+      case '--batch-size':   args.batchSize = Number(argv[++i]); break
+      case '--throttle-ms':  args.throttleMs = Number(argv[++i]); break
+      case '--help': case '-h': printHelp(); process.exit(0)
     }
   }
-  if (!args.onlyIsCurrentUpdate && !args.file) { console.error('Error: --file is required'); process.exit(1) }
+  if (!args.file) { console.error('Error: --file is required\nRun with --help for usage.'); process.exit(1) }
   return args
 }
 
@@ -162,6 +194,7 @@ interface OwnerRow {
   plate_state:          string
   stored_date:          string | null
   stored_time:          string | null
+  is_current:           boolean
   vin:                  string | null
   vehicle_year:         number | null
   vehicle_make:         string | null
@@ -212,7 +245,7 @@ interface OwnerRow {
   last_chgd_time:       string | null
 }
 
-function parseRow(tokens: string[], col: Record<string, number>): OwnerRow | null {
+function parseRow(tokens: string[], col: Record<string, number>, isCurrent: boolean): OwnerRow | null {
   const g = (name: string) => (tokens[col[name]] ?? '').trim()
 
   const plateNumber = g('PVS-TAGID-LICENSE')
@@ -230,6 +263,7 @@ function parseRow(tokens: string[], col: Record<string, number>): OwnerRow | nul
     plate_state:          g('PVS-TAGID-STATE') || null!,
     stored_date:          parseDate(g('PVS-OW-STORE-DATE')),
     stored_time:          g('PVS-OW-STORE-TIME') || null,
+    is_current:           isCurrent,
     vin:                  g('PVS-OW-VIN') || null,
     vehicle_year:         parseYear(g('PVS-OW-YEAR-MAKE')),
     vehicle_make:         g('PVS-OW-MAKE') || null,
@@ -284,7 +318,7 @@ function parseRow(tokens: string[], col: Record<string, number>): OwnerRow | nul
 // ---------- upsert -------------------------------------------------------------
 
 const FIELDS: (keyof OwnerRow)[] = [
-  'plate_number', 'plate_state', 'stored_date', 'stored_time',
+  'plate_number', 'plate_state', 'stored_date', 'stored_time', 'is_current',
   'vin', 'vehicle_year', 'vehicle_make', 'vehicle_type', 'body_style', 'vehicle_use', 'color_primary',
   'owner_lname', 'owner_fname', 'owner_mname', 'owner_full_name', 'owner_type',
   'owner_address', 'owner_apt', 'owner_city', 'owner_state', 'owner_zip', 'owner_country',
@@ -334,26 +368,60 @@ async function upsertBatch(client: Client, rows: OwnerRow[]): Promise<void> {
   `, params)
 }
 
-// ---------- is_current update --------------------------------------------------
+// ---------- pass 1: build latest-per-plate map ---------------------------------
 
-async function updateIsCurrentFlags(client: Client): Promise<void> {
-  process.stdout.write('Updating is_current flags (this may take a few minutes on large tables)...\n')
-  await client.query(`SET statement_timeout = 0`)
-  process.stdout.write('  Resetting all is_current = false...')
-  await client.query(`UPDATE public.registration_records SET is_current = false`)
-  console.log(' done.')
-  process.stdout.write('  Setting is_current = true on latest per plate...')
-  await client.query(`
-    WITH latest AS (
-      SELECT DISTINCT ON (plate_number, plate_state) id
-      FROM public.registration_records
-      ORDER BY plate_number, plate_state, stored_date DESC NULLS LAST, stored_time DESC NULLS LAST
-    )
-    UPDATE public.registration_records
-    SET is_current = true
-    WHERE id IN (SELECT id FROM latest)
-  `)
-  console.log(' done.')
+interface LatestEntry { stored_date: string | null; stored_time: string | null }
+
+function isLater(a: LatestEntry, b: LatestEntry): boolean {
+  // mirrors: ORDER BY stored_date DESC NULLS LAST, stored_time DESC NULLS LAST
+  const aDate = a.stored_date ?? '0000-00-00'
+  const bDate = b.stored_date ?? '0000-00-00'
+  if (aDate !== bDate) return aDate > bDate
+  const aTime = a.stored_time ?? ''
+  const bTime = b.stored_time ?? ''
+  return aTime > bTime
+}
+
+async function buildLatestMap(file: string, limit: number | null): Promise<Map<string, LatestEntry>> {
+  const map = new Map<string, LatestEntry>()
+  const rl = createInterface({ input: createReadStream(file), crlfDelay: Infinity })
+
+  let headerParsed = false
+  let colMap: Record<string, number> = {}
+  let rowCount = 0
+
+  for await (const rawLine of rl) {
+    const line = rawLine.replace(/^\uFEFF/, '')
+
+    if (!headerParsed) {
+      line.split('\t').forEach((name, idx) => { colMap[name.trim()] = idx })
+      headerParsed = true
+      continue
+    }
+
+    if (!line.trim()) continue
+    if (limit !== null && rowCount >= limit) break
+    rowCount++
+
+    const tokens = line.split('\t')
+    const g = (name: string) => (tokens[colMap[name]] ?? '').trim()
+
+    const plateNumber = g('PVS-TAGID-LICENSE')
+    if (!plateNumber) continue
+
+    const plateState  = g('PVS-TAGID-STATE')
+    const stored_date = parseDate(g('PVS-OW-STORE-DATE'))
+    const stored_time = g('PVS-OW-STORE-TIME') || null
+    const key         = `${plateNumber}|${plateState}`
+    const entry       = map.get(key)
+    const candidate   = { stored_date, stored_time }
+
+    if (!entry || isLater(candidate, entry)) {
+      map.set(key, candidate)
+    }
+  }
+
+  return map
 }
 
 // ---------- main ---------------------------------------------------------------
@@ -367,21 +435,18 @@ async function main() {
     if (!dbUrl) { console.error('Error: DATABASE_URL not set in .env'); process.exit(1) }
   }
 
+  // --- Pass 1 ---
+  console.log('Pass 1: scanning for latest record per plate...')
+  const latestMap = await buildLatestMap(args.file, args.limit)
+  console.log(`  ${latestMap.size.toLocaleString()} unique plates found.\n`)
+
   // Connect to DB before creating readline — readline starts buffering immediately
   // on creation, so any await between createInterface and for-await risks dropping lines.
-  const client = (args.dryRun && !args.onlyIsCurrentUpdate) ? null : new Client({ connectionString: process.env.DATABASE_URL! })
+  const client = args.dryRun ? null : new Client({ connectionString: process.env.DATABASE_URL! })
   if (client) await client.connect()
 
-  if (args.onlyIsCurrentUpdate) {
-    try {
-      await updateIsCurrentFlags(client!)
-      console.log('is_current update complete.')
-    } finally {
-      await client!.end()
-    }
-    return
-  }
-
+  // --- Pass 2 ---
+  console.log('Pass 2: importing rows with is_current set...')
   const rl = createInterface({ input: createReadStream(args.file), crlfDelay: Infinity })
 
   let colMap: Record<string, number> = {}
@@ -390,7 +455,9 @@ async function main() {
   let totalParsed = 0
   let totalSkipped = 0
   let totalUpserted = 0
-  let lineNum = 0
+  let currentCount = 0
+
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
   const flushBatch = async () => {
     if (batch.length === 0) return
@@ -398,17 +465,17 @@ async function main() {
       await upsertBatch(client, batch)
       totalUpserted += batch.length
     }
+    if (args.throttleMs > 0) await sleep(args.throttleMs)
     batch = []
   }
 
   try {
-    for await (const line of rl) {
-      lineNum++
+    for await (const rawLine of rl) {
+      const line = rawLine.replace(/^\uFEFF/, '')
 
       if (!headerParsed) {
-        const tokens = line.split('\t').map((s) => s.trim().replace(/^\uFEFF/, ''))
-        tokens.forEach((name, idx) => { colMap[name] = idx })
-for (const col of COLUMNS) {
+        line.split('\t').forEach((name, idx) => { colMap[name.trim()] = idx })
+        for (const col of COLUMNS) {
           if (!(col in colMap)) { console.error(`Missing column: ${col}`); process.exit(1) }
         }
         headerParsed = true
@@ -419,9 +486,21 @@ for (const col of COLUMNS) {
       if (args.limit !== null && totalParsed >= args.limit) break
 
       const tokens = line.split('\t')
-      const row = parseRow(tokens, colMap)
+      const plateNum   = (tokens[colMap['PVS-TAGID-LICENSE']] ?? '').trim()
+      const plateState = (tokens[colMap['PVS-TAGID-STATE']]   ?? '').trim()
+      const storedDate = parseDate((tokens[colMap['PVS-OW-STORE-DATE']] ?? '').trim())
+      const storedTime = (tokens[colMap['PVS-OW-STORE-TIME']] ?? '').trim() || null
+
+      const plateKey = `${plateNum}|${plateState}`
+      const entry    = latestMap.get(plateKey)
+      const isCurrent = entry !== undefined
+        && (storedDate ?? '') === (entry.stored_date ?? '')
+        && (storedTime ?? '') === (entry.stored_time ?? '')
+
+      const row = parseRow(tokens, colMap, isCurrent)
       if (!row) { totalSkipped++; continue }
 
+      if (isCurrent) currentCount++
       totalParsed++
       batch.push(row)
 
@@ -435,21 +514,16 @@ for (const col of COLUMNS) {
 
     await flushBatch()
 
-    console.log(`\nParsed: ${totalParsed.toLocaleString()} rows, skipped: ${totalSkipped}`)
+    console.log(`\nParsed:    ${totalParsed.toLocaleString()} rows`)
+    console.log(`Skipped:   ${totalSkipped}`)
+    console.log(`is_current: ${currentCount.toLocaleString()} rows marked true`)
 
     if (args.dryRun) {
       console.log('Dry run — no DB writes.')
       return
     }
 
-    console.log(`Upserted: ${totalUpserted.toLocaleString()} rows`)
-
-    if (!args.skipIsCurrentUpdate && client) {
-      await updateIsCurrentFlags(client)
-    } else if (args.skipIsCurrentUpdate) {
-      console.log('Skipped is_current update — run via Supabase SQL after full import.')
-    }
-
+    console.log(`Upserted:  ${totalUpserted.toLocaleString()} rows`)
     console.log('Import complete.')
   } finally {
     if (client) await client.end()

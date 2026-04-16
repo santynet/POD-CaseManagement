@@ -18,15 +18,32 @@ import { Client } from 'pg'
 
 interface Args { file: string; dryRun: boolean }
 
+function printHelp(): void {
+  console.log(`
+Usage: npm run import:court-locations -- --file <path> [options]
+
+Import court locations (PVS3852-CRTLOC.TXT) into the court_locations table.
+Upserts on code.
+
+Options:
+  --file <path>   Required. Path to the PVS tab-delimited court locations file.
+  --dry-run       Parse and print only; no DB writes.
+  --help, -h      Show this help message.
+
+Requires DATABASE_URL in .env (Supabase → Settings → Database → Connection pooler, Session mode).
+`.trim())
+}
+
 function parseArgs(argv: string[]): Args {
   const args: Args = { file: '', dryRun: false }
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
-      case '--file': args.file = argv[++i]; break
-      case '--dry-run': args.dryRun = true; break
+      case '--file':       args.file = argv[++i]; break
+      case '--dry-run':    args.dryRun = true; break
+      case '--help': case '-h': printHelp(); process.exit(0)
     }
   }
-  if (!args.file) { console.error('Error: --file is required'); process.exit(1) }
+  if (!args.file) { console.error('Error: --file is required\nRun with --help for usage.'); process.exit(1) }
   return args
 }
 

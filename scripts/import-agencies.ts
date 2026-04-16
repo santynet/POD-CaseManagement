@@ -21,15 +21,32 @@ interface Args {
   dryRun: boolean
 }
 
+function printHelp(): void {
+  console.log(`
+Usage: npm run import:agencies -- --file <path> [options]
+
+Import collection agencies (PVS3831-TBLDATA1-CAGENCY.TXT) into the
+collection_agencies table. Upserts on agency_code.
+
+Options:
+  --file <path>   Required. Path to the PVS tab-delimited agencies file.
+  --dry-run       Parse and print only; no DB writes.
+  --help, -h      Show this help message.
+
+Requires DATABASE_URL in .env (Supabase → Settings → Database → Connection pooler, Session mode).
+`.trim())
+}
+
 function parseArgs(argv: string[]): Args {
   const args: Args = { file: '', dryRun: false }
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
-      case '--file': args.file = argv[++i]; break
-      case '--dry-run': args.dryRun = true; break
+      case '--file':       args.file = argv[++i]; break
+      case '--dry-run':    args.dryRun = true; break
+      case '--help': case '-h': printHelp(); process.exit(0)
     }
   }
-  if (!args.file) { console.error('Error: --file is required'); process.exit(1) }
+  if (!args.file) { console.error('Error: --file is required\nRun with --help for usage.'); process.exit(1) }
   return args
 }
 
